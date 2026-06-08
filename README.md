@@ -1,5 +1,5 @@
 # NetDefender-ESP32 (2FA & IDS Spectrum Monitor)
-
+# IS AN UNFINISHED VERSION! Because of this, some functions may not work correctly.
 An advanced, low-level hardware solution for wireless auditing and network state monitoring. This firmware transforms an ordinary ESP32 microcontroller into an autonomic Layer 2 Wi-Fi Intrusion Detection System (IDS) and secure network node protected by Two-Factor Authentication (2FA).
 
 ---
