@@ -1,101 +1,213 @@
 #include <WiFi.h>
 #include <WebServer.h>
-#include "esp_wifi.h"
-#include "mbedtls/md.h"
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
+#include <esp_pm.h>
 
-#define _L1 1200
-#define _L2 20
-#define _P0 80
-#define _SZ 2
+// TODO: REMEMBER TO CHANGE THIS BEFORE FLASHING!!!
+const char* ap_ssid = "Netdefender-Node";
+const char* ap_password = "admin12345678";
+const char* ssid_internet = "YOUR_WIFI_NAME"; 
+const char* password_internet = "YOUR_WIFI_PASS";
+#define BOTtoken "123456789:ABCdefGhIJKlmNoPQ"
+#define CHAT_ID "987654321"
 
-// enter your home wi-fi router network name here
-const char* _st = "your_wifi_name_here";        
+// global control flags (dirty way)
+bool idsMode = true;
+bool spectrumMonitor = true;
+bool secureNode2FA = false;
+bool telegramAlerts = false;
+bool sdLogging = false;
 
-// enter your home wi-fi network password here
-const char* _ps = "your_wifi_password_here";  
+WebServer server(80);
+WiFiClientSecure tgClient;
+UniversalTelegramBot bot(BOTtoken, tgClient);
 
-// create a master password to unlock the admin web page
-const char* _mk = "admin_secure_key";     
-
-// enter the exact 20-character key from google authenticator app here
-const char* _sd = "SECURESEEDXTRATWOREW"; 
-
-// add trusted mac addresses here to exclude them from attack detection
-const uint8_t _ex[_SZ] = {
-  {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF},   
-  {0x11, 0x22, 0x33, 0x44, 0x55, 0x66}    
-};
-
-WebServer _srv(_P0);
-volatile uint32_t _v1 = 0, _v2 = 0;
-unsigned long _t0 = 0;
-bool _ok = false;
-
-bool _f1(uint8_t* m) {
-  for (int i = 0; i < _SZ; i++) { if (memcmp(_ex[i], m, 6) == 0) return true; }
-  return false;
-}
-
-uint32_t _f2(const char* k, uint64_t s) {
-  uint8_t kh[] = {0x01, 0x03, 0x05, 0x07, 0x09, 0x0A, 0x0C, 0x0E, 0x0F, 0x11};
-  uint8_t msg; for (int i = 7; i >= 0; i--) { msg[i] = s & 0xFF; s >>= 8; }
-  uint8_t out; mbedtls_md_context_t c; mbedtls_md_init(&c);
-  mbedtls_md_setup(&c, mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
-  mbedtls_md_hmac_starts(&c, kh, 10); mbedtls_md_hmac_update(&c, msg, 8);
-  mbedtls_md_hmac_finish(&c, out); mbedtls_md_free(&c);
-  uint32_t o = out & 0x0F;
-  uint32_t b = (out[o] & 0x7F) << 24 | (out[o+1] & 0xFF) << 16 | (out[o+2] & 0xFF) << 8 | (out[o+3] & 0xFF);
-  return (b % 1000000);
-}
-
-void _f3(void* b, wifi_promiscuous_pkt_type_t t) {
-  wifi_promiscuous_pkt_t* p = (wifi_promiscuous_pkt_t*)b;
-  uint8_t* pay = p->payload; if (_f1(pay + 10)) return;
-  _v1++; if (t == WIFI_PKT_MGMT && (pay == 0xC0 || pay == 0xA0)) _v2++;
-}
-
-const char _HT[] PROGMEM = "<html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1.0'><title>Auth</title><style>body{background:#0a0c10;color:#e1e7ed;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}.box{background:#12161f;padding:35px;border-radius:12px;border:1px solid #21262d;width:100%;max-width:320px;text-align:center;}input{width:100%;padding:12px;margin:12px 0;background:#0d1117;border:1px solid #30363d;color:#fff;border-radius:6px;box-sizing:border-box;font-size:16px;text-align:center;font-family:monospace;}button{width:100%;padding:14px;background:#238636;border:none;color:#fff;font-weight:bold;border-radius:6px;cursor:pointer;font-family:monospace;}h2{color:#58a6ff;margin:0 0 10px 0;}p{color:#8b949e;font-size:13px;}</style></head><body><div class='box'><h2>[ GATEWAY LOCKED ]</h2><p>Provide admin credentials and 2FA token.</p><form action='/auth' method='POST'><input type='password' name='p_word' placeholder='Password' required><input type='text' name='t_code' placeholder='000000' pattern='[0-9]{6}' required><button type='submit'>Verify</button></form></div></body></html>";
-
-void _w1() {
-  if (_ok) _srv.send(200, "text/html", "<html><body style='background:#0a0c10;color:#58a6ff;font-family:monospace;text-align:center;padding-top:100px;'><h1>[ SYSTEM OPERATIONAL ]</h1><p style='color:#fff;'>IDS active. Node is silently sniffing RF spectrum.</p></body></html>");
-  else _srv.send_P(200, "text/html", _HT);
-}
-
-void _w2() {
-  String p = _srv.arg("p_word"), c = _srv.arg("t_code");
-  uint64_t ts = time(NULL) / 30; if (ts == 0) ts = 57293847; 
-  char exp; sprintf(exp, "%06d", _f2(_sd, ts));
-  if (p == _mk && (c == String(exp) || c == "123456")) {
-    _ok = true; Serial.println("\n[SEC] Access granted. Admin panel unlocked.");
-    _srv.send(200, "text/html", "<html><head><meta http-equiv='refresh' content='1;url=/'></head><body>Loading node configuration...</body></html>");
-  } else {
-    Serial.println("\n[WARN] Security breach attempt! 2FA verification failed.");
-    _srv.send(200, "text/html", "<html><body style='background:#0a0c10;color:#f85149;font-family:monospace;text-align:center;padding-top:50px;'><h2>[ AUTHENTICATION FAILED ]</h2><a href='/' style='color:#8b949e;'>Retry</a></body></html>");
-  }
-}
+// global variables for non-blocking delay timers
+unsigned long t_tg = 0;
+unsigned long t_ids = 0;
+unsigned long t_spec = 0;
+unsigned long t_sd = 0;
+int w_retry = 0; 
 
 void setup() {
-  Serial.begin(115200); delay(500);
-  Serial.println("\n\n--- COMPILING SILENT DETECTOR MATRIX ---");
-  WiFi.mode(WIFI_STA); WiFi.begin(_st, _ps);
-  Serial.print("[SYS] Connecting to home infrastructure...");
-  int att = 0; while (WiFi.status() != WL_CONNECTED && att < 30) { delay(500); Serial.print("."); att++; }
-  if(WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[SYS] Connected successfully!");
-    Serial.print("[SYS] Node IP address inside your network: "); Serial.println(WiFi.localIP()); 
-  } else Serial.println("\n[WARN] Infrastructure fallback. Check WiFi credentials.");
-  _srv.on("/", _w1); _srv.on("/auth", _w2);
-  _srv.onNotFound([]() { _srv.send_P(200, "text/html", _HT); }); _srv.begin();
-  esp_wifi_set_promiscuous(true); esp_wifi_set_promiscuous_rx_cb(&_f3);
-  Serial.println("[SYS] Real-time IDS daemon initialized.");
+  Serial.begin(115200);
+  delay(600); // boot delay just in case
+  Serial.println("\n*** STARTING CORE v2.2 ***");
+
+  // power management (modem sleep hack to save battery)
+  esp_pm_config_esp32_t pm;
+  pm.max_freq_mhz = 240;
+  pm.min_freq_mhz = 80; // DO NOT DROP BELOW 80 OR WIFI WILL CRASH
+  pm.light_sleep_enable = true;
+  if (esp_pm_configure(&pm) == ESP_OK) {
+    Serial.println("power config applied");
+  }
+
+  // init AP for local panel
+  WiFi.softAP(ap_ssid, ap_password);
+  WiFi.setSleep(true); // radio sleep on
+  Serial.print("Local IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // connect to home router for internet
+  tgClient.setInsecure(); // ignore SSL cert validation bypass
+  WiFi.begin(ssid_internet, password_internet);
+  Serial.print("connecting sta");
+  
+  // connection retry loop
+  while (WiFi.status() != WL_CONNECTED && w_retry < 12) {
+    delay(1000);
+    Serial.print(".");
+    w_retry++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\ninternet ok, bot armed");
+    telegramAlerts = true;
+    bot.sendMessage(CHAT_ID, "node online (battery saver mode)", "");
+  } else {
+    Serial.println("\nconnection failed, tg disabled");
+    telegramAlerts = false; // block crash loops
+  }
+
+  // http routes
+  server.on("/", handleMainPanel);
+  server.on("/toggle", handleStateToggle);
+  server.begin();
+
+  // console manual menu
+  Serial.println("\nCommands:");
+  Serial.println("status | ids on | ids off | spec on | spec off | tg on | tg off | sd on | sd off");
 }
 
 void loop() {
-  _srv.handleClient();
-  if (millis() - _t0 > 3000) {
-    _t0 = millis();
-    if (_v1 > _L1) { Serial.println("\n[CRIT] INFRASTRUCTURE FLOOD DETECTED!"); Serial.printf("[DATA] Current air saturation: %d frames/3sec.\n", _v1); }
-    if (_v2 > _L2) { Serial.println("\n[ALERT] INTRUSION WARNING! Jamming frame burst detected."); Serial.printf("[DATA] Tracked deauth events: %d packets/3sec.\n", _v2); }
-    _v1 = 0; _v2 = 0;
+  server.handleClient();
+  readSerial();       
+  runTgBot();     
+
+  // engine loops
+  if (idsMode) doIDS();
+  if (spectrumMonitor) doSpectrum();
+  if (sdLogging) doSD();
+}
+
+// ugly raw serial input parser
+void readSerial() {
+  if (Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "status") {
+      Serial.println("\n--- STATE ---");
+      Serial.print("IDS: "); Serial.println(idsMode ? "1" : "0");
+      Serial.print("SPEC: "); Serial.println(spectrumMonitor ? "1" : "0");
+      Serial.print("TG: "); Serial.println(telegramAlerts ? "1" : "0");
+      Serial.print("SD: "); Serial.println(sdLogging ? "1" : "0");
+      Serial.print("2FA: "); Serial.println(secureNode2FA ? "LOCK" : "OPEN");
+    } 
+    else if (cmd == "ids on")   idsMode = true;
+    else if (cmd == "ids off")  idsMode = false;
+    else if (cmd == "spec on")  spectrumMonitor = true;
+    else if (cmd == "spec off") spectrumMonitor = false;
+    else if (cmd == "tg on")    telegramAlerts = true;
+    else if (cmd == "tg off")   telegramAlerts = false;
+    else if (cmd == "sd on")    sdLogging = true;
+    else if (cmd == "sd off")   sdLogging = false;
+    else if (cmd == "2fa on")   secureNode2FA = true;
+    else if (cmd == "2fa off")  secureNode2FA = false;
+  }
+}
+
+// telegram loop
+void runTgBot() {
+  if (millis() - t_tg > 2500) { // check tg query queue every 2.5s
+    int updates = bot.getUpdates(bot.last_message_received + 1);
+
+    while (updates) {
+      for (int i = 0; i < updates; i++) {
+        String uid = String(bot.messages[i].chat_id);
+        
+        if (uid != CHAT_ID) {
+          bot.sendMessage(uid, "denied", "");
+          continue;
+        }
+
+        String msg = bot.messages[i].text;
+
+        if (msg == "/status") {
+          String s = "Status:\n";
+          s += "IDS: " + String(idsMode ? "ON" : "OFF") + "\n";
+          s += "SPEC: " + String(spectrumMonitor ? "ON" : "OFF") + "\n";
+          s += "SD: " + String(sdLogging ? "ON" : "OFF") + "\n";
+          s += "2FA: " + String(secureNode2FA ? "LOCKED" : "OPEN");
+          bot.sendMessage(uid, s, "");
+        } 
+        else if (msg == "/ids_on")   { idsMode = true; bot.sendMessage(uid, "ids on", ""); }
+        else if (msg == "/ids_off")  { idsMode = false; bot.sendMessage(uid, "ids off", ""); }
+        else if (msg == "/spec_on")  { spectrumMonitor = true; bot.sendMessage(uid, "spec on", ""); }
+        else if (msg == "/spec_off") { spectrumMonitor = false; bot.sendMessage(uid, "spec off", ""); }
+        else if (msg == "/sd_on")    { sdLogging = true; bot.sendMessage(uid, "sd on", ""); }
+        else if (msg == "/sd_off")   { sdLogging = false; bot.sendMessage(uid, "sd off", ""); }
+      }
+      updates = bot.getUpdates(bot.last_message_received + 1);
+    }
+    t_tg = millis();
+  }
+}
+
+// dirty hardcoded HTML page layout
+void handleMainPanel() {
+  String page = "<html><head><title>Panel</title><meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  page += "<style>body{background:#111;color:#fff;font-family:monospace;text-align:center;} .card{background:#222;max-width:350px;margin:50px auto;padding:20px;} ";
+  page += ".r{display:flex;justify-content:space-between;margin-bottom:15px;} .b{color:#fff;text-decoration:none;padding:5px 10px;} .g{background:green;} .d{background:red;}</style></head><body>";
+  page += "<div class='card'><h2>Netdefender</h2>";
+  
+  page += "<div class='r'><span>IDS</span><a class='b " + String(idsMode ? "g" : "d") + "' href='/toggle?set=ids'>" + (idsMode ? "ON" : "OFF") + "</a></div>";
+  page += "<div class='r'><span>Spectrum</span><a class='b " + String(spectrumMonitor ? "g" : "d") + "' href='/toggle?set=spec'>" + (spectrumMonitor ? "ON" : "OFF") + "</a></div>";
+  page += "<div class='r'><span>SD Card</span><a class='b " + String(sdLogging ? "g" : "d") + "' href='/toggle?set=sd'>" + (sdLogging ? "ON" : "OFF") + "</a></div>";
+  page += "<div class='r'><span>Telegram</span><a class='b " + String(telegramAlerts ? "g" : "d") + "' href='/toggle?set=tg'>" + (telegramAlerts ? "ON" : "OFF") + "</a></div>";
+  page += "<div class='r'><span>2FA Lock</span><a class='b " + String(secureNode2FA ? "g" : "d") + "' href='/toggle?set=2fa'>" + (secureNode2FA ? "LOCK" : "OPEN") + "</a></div>";
+  
+  page += "</div></body></html>";
+  server.send(200, "text/html", page);
+}
+
+void handleStateToggle() {
+  if (server.hasArg("set")) {
+    String arg = server.arg("set");
+    if (arg == "ids")  idsMode = !idsMode;
+    if (arg == "spec") spectrumMonitor = !spectrumMonitor;
+    if (arg == "sd")   sdLogging = !sdLogging;
+    if (arg == "tg")   telegramAlerts = !telegramAlerts;
+    if (arg == "2fa")  secureNode2FA = !secureNode2FA;
+  }
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+// core routines
+void doIDS() {
+  if (millis() - t_ids > 6000) {
+    // paste raw register/sniffer code here later
+    Serial.println("[IDS] sniffing");
+    t_ids = millis();
+  }
+}
+
+void doSpectrum() {
+  if (millis() - t_spec > 7000) {
+    // paste channel hop loop here later
+    Serial.println("[SPEC] hopping");
+    t_spec = millis();
+  }
+}
+
+void doSD() {
+  if (millis() - t_sd > 10000) {
+    // paste file write blocks here later
+    Serial.println("[SD] syncing log");
+    t_sd = millis();
   }
 }
