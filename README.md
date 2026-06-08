@@ -60,3 +60,4 @@ To guarantee true infrastructure flexibility, the modular core interacts simulta
 * Establishes a direct, unmanaged local hardware UART serial pipeline communicating at a stable `115200` baud rate.
 * Executes proactive line cleaning (`input.trim()`) to prevent instruction parsing failures caused by non-standard terminal carriage returns (`\r\n`).
 * Provides bare-metal low-level developers with immediate runtime status logs and manual hardware feature overrides.
+just my friend @jsno1001
